@@ -1,0 +1,51 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Download Android Platform Tools
+        shell: pwsh
+        run: |
+          $url = "https://dl.google.com/android/repository/platform-tools-latest-windows.zip"
+          Invoke-WebRequest -Uri $url -OutFile platform-tools.zip
+          Expand-Archive -Path platform-tools.zip -DestinationPath .
+          Remove-Item platform-tools.zip
+          if (!(Test-Path "platform-tools\adb.exe")) { throw "ADB was not found." }
+
+      - name: Build EXE
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed `
+            --name HuaweiFRPAssistant `
+            --add-data "device_database.json;." `
+            app.py
+
+      - name: Bundle Platform Tools
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging\platform-tools | Out-Null
+          Copy-Item platform-tools\* staging\platform-tools\ -Recurse -Force
+          Copy-Item dist\HuaweiFRPAssistant.exe staging\HuaweiFRPAssistant.exe
+          Copy-Item README.md staging\README.md
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Huawei-FRP-Assistant-Windows
+          path: staging
