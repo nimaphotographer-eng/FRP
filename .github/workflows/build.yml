@@ -3,49 +3,223 @@ name: Build Windows EXE
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master ]
+    branches:
+      - main
 
 jobs:
-  build-windows:
+  build:
     runs-on: windows-latest
+
     steps:
+
+      # ---------------------------------------------------------
+      # Checkout
+      # ---------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
+
+      # ---------------------------------------------------------
+      # Python
+      # ---------------------------------------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        run: python -m pip install --upgrade pip && pip install -r requirements.txt
 
+      # ---------------------------------------------------------
+      # Python dependencies
+      # ---------------------------------------------------------
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+
+      # ---------------------------------------------------------
+      # Download official Android Platform Tools
+      # ---------------------------------------------------------
       - name: Download Android Platform Tools
         shell: pwsh
         run: |
-          $url = "https://dl.google.com/android/repository/platform-tools-latest-windows.zip"
-          Invoke-WebRequest -Uri $url -OutFile platform-tools.zip
-          Expand-Archive -Path platform-tools.zip -DestinationPath .
-          Remove-Item platform-tools.zip
-          if (!(Test-Path "platform-tools\adb.exe")) { throw "ADB was not found." }
 
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "Downloading Android Platform Tools..."
+
+          $url = "https://dl.google.com/android/repository/platform-tools-latest-windows.zip"
+
+          $zip = Join-Path $env:RUNNER_TEMP "platform-tools.zip"
+
+          $extract = Join-Path $env:RUNNER_TEMP "platform-tools-extracted"
+
+          Invoke-WebRequest `
+            -Uri $url `
+            -OutFile $zip
+
+          Write-Host "Downloaded:"
+          Write-Host $zip
+
+          if (Test-Path $extract) {
+              Remove-Item `
+                $extract `
+                -Recurse `
+                -Force
+          }
+
+          Expand-Archive `
+            -Path $zip `
+            -DestinationPath $extract `
+            -Force
+
+          if (Test-Path "platform-tools") {
+              Remove-Item `
+                "platform-tools" `
+                -Recurse `
+                -Force
+          }
+
+          New-Item `
+            -ItemType Directory `
+            -Path "platform-tools" `
+            -Force | Out-Null
+
+          Copy-Item `
+            "$extract\platform-tools\*" `
+            "platform-tools" `
+            -Recurse `
+            -Force
+
+          Write-Host ""
+          Write-Host "Platform Tools contents:"
+          Get-ChildItem "platform-tools"
+
+          if (!(Test-Path "platform-tools\adb.exe")) {
+              throw "ERROR: adb.exe was not found."
+          }
+
+          if (!(Test-Path "platform-tools\fastboot.exe")) {
+              throw "ERROR: fastboot.exe was not found."
+          }
+
+          if (!(Test-Path "platform-tools\AdbWinApi.dll")) {
+              throw "ERROR: AdbWinApi.dll was not found."
+          }
+
+          if (!(Test-Path "platform-tools\AdbWinUsbApi.dll")) {
+              throw "ERROR: AdbWinUsbApi.dll was not found."
+          }
+
+          Write-Host ""
+          Write-Host "ADB/Fastboot files verified successfully."
+
+
+      # ---------------------------------------------------------
+      # Build PyInstaller EXE
+      # ---------------------------------------------------------
       - name: Build EXE
+        shell: cmd
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed `
-            --name HuaweiFRPAssistant `
-            --add-data "device_database.json;." `
+
+          python -m PyInstaller ^
+            --noconfirm ^
+            --clean ^
+            --onefile ^
+            --windowed ^
+            --name HuaweiFRPAssistant ^
+            --add-data "device_database.json;." ^
+            --add-binary "platform-tools\adb.exe;platform-tools" ^
+            --add-binary "platform-tools\AdbWinApi.dll;platform-tools" ^
+            --add-binary "platform-tools\AdbWinUsbApi.dll;platform-tools" ^
+            --add-binary "platform-tools\fastboot.exe;platform-tools" ^
             app.py
 
-      - name: Bundle Platform Tools
+
+      # ---------------------------------------------------------
+      # Verify EXE
+      # ---------------------------------------------------------
+      - name: Verify EXE
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path staging\platform-tools | Out-Null
-          Copy-Item platform-tools\* staging\platform-tools\ -Recurse -Force
-          Copy-Item dist\HuaweiFRPAssistant.exe staging\HuaweiFRPAssistant.exe
-          Copy-Item README.md staging\README.md
 
-      - name: Upload artifact
+          $exe = "dist\HuaweiFRPAssistant.exe"
+
+          if (!(Test-Path $exe)) {
+              throw "ERROR: HuaweiFRPAssistant.exe was not produced."
+          }
+
+          $file = Get-Item $exe
+
+          Write-Host ""
+          Write-Host "============================================"
+          Write-Host "BUILD VERIFICATION"
+          Write-Host "============================================"
+          Write-Host "EXE:"
+          Write-Host $file.FullName
+          Write-Host ""
+          Write-Host "Size:"
+          Write-Host $file.Length
+          Write-Host " bytes"
+          Write-Host "============================================"
+
+          if ($file.Length -lt 1000000) {
+              throw "ERROR: EXE size is unexpectedly small."
+          }
+
+
+      # ---------------------------------------------------------
+      # Prepare artifact
+      # ---------------------------------------------------------
+      - name: Prepare artifact
+        shell: pwsh
+        run: |
+
+          if (Test-Path "artifact") {
+              Remove-Item `
+                "artifact" `
+                -Recurse `
+                -Force
+          }
+
+          New-Item `
+            -ItemType Directory `
+            -Path "artifact" `
+            -Force | Out-Null
+
+          Copy-Item `
+            "dist\HuaweiFRPAssistant.exe" `
+            "artifact\HuaweiFRPAssistant.exe"
+
+          Copy-Item `
+            "README.md" `
+            "artifact\README.md"
+
+          New-Item `
+            -ItemType Directory `
+            -Path "artifact\platform-tools" `
+            -Force | Out-Null
+
+          Copy-Item `
+            "platform-tools\*" `
+            "artifact\platform-tools" `
+            -Recurse `
+            -Force
+
+          Write-Host ""
+          Write-Host "Artifact contents:"
+          Get-ChildItem `
+            "artifact" `
+            -Recurse
+
+
+      # ---------------------------------------------------------
+      # Upload artifact
+      # ---------------------------------------------------------
+      - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: Huawei-FRP-Assistant-Windows
-          path: staging
+          path: artifact
+          if-no-files-found: error
