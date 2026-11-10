@@ -1,53 +1,150 @@
-
-import os, shutil, subprocess, re
+import os
+import subprocess
+import sys
 from pathlib import Path
+
 
 class DeviceManager:
     def __init__(self):
-        self.base = Path(__file__).parent
-        self.pt = self.base / "platform-tools"
-        self.adb = self.pt / ("adb.exe" if os.name == "nt" else "adb")
-        self.fastboot = self.pt / ("fastboot.exe" if os.name == "nt" else "fastboot")
+        self.base_dir = self._get_base_dir()
+        self.platform_tools = self.base_dir / "platform-tools"
 
-    def _run(self, exe, args, timeout=8):
-        if not exe.exists():
-            return {"ok": False, "error": f"Missing tool: {exe}"}
+        self.adb = self.platform_tools / (
+            "adb.exe" if os.name == "nt" else "adb"
+        )
+
+        self.fastboot = self.platform_tools / (
+            "fastboot.exe" if os.name == "nt" else "fastboot"
+        )
+
+    @staticmethod
+    def _get_base_dir():
+        """
+        Returns the correct application resource directory.
+
+        Normal Python execution:
+            project directory
+
+        PyInstaller --onefile execution:
+            sys._MEIPASS
+        """
+        if getattr(sys, "frozen", False):
+            meipass = getattr(sys, "_MEIPASS", None)
+
+            if meipass:
+                return Path(meipass)
+
+        return Path(__file__).resolve().parent
+
+    def _run(self, executable, arguments, timeout=20):
+        executable = Path(executable)
+
+        if not executable.exists():
+            return {
+                "ok": False,
+                "error": f"Missing tool: {executable}"
+            }
+
         try:
-            p = subprocess.run([str(exe), *args], capture_output=True, text=True,
-                               timeout=timeout, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            return {"ok": p.returncode == 0, "returncode": p.returncode,
-                    "stdout": p.stdout.strip(), "stderr": p.stderr.strip()}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+            process = subprocess.run(
+                [str(executable), *arguments],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                creationflags=(
+                    subprocess.CREATE_NO_WINDOW
+                    if os.name == "nt"
+                    else 0
+                )
+            )
+
+            return {
+                "ok": process.returncode == 0,
+                "returncode": process.returncode,
+                "stdout": process.stdout.strip(),
+                "stderr": process.stderr.strip()
+            }
+
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "error": f"Command timed out after {timeout} seconds."
+            }
+
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": str(exc)
+            }
 
     def adb_devices(self):
-        r = self._run(self.adb, ["devices", "-l"])
-        return {"transport": "adb", **r}
+        return self._run(
+            self.adb,
+            ["devices", "-l"]
+        )
 
     def fastboot_devices(self):
-        r = self._run(self.fastboot, ["devices"])
-        return {"transport": "fastboot", **r}
+        return self._run(
+            self.fastboot,
+            ["devices"]
+        )
 
-    def shell_getprop(self, prop):
-        return self._run(self.adb, ["shell", "getprop", prop])
+    def get_properties(self):
+        result = self._run(
+            self.adb,
+            ["shell", "getprop"]
+        )
 
-    def detect(self):
-        result = {"adb": self.adb_devices(), "fastboot": self.fastboot_devices()}
-        adb = result["adb"]
-        if adb.get("ok") and adb.get("stdout"):
-            serials = []
-            for line in adb["stdout"].splitlines():
-                if line.startswith("List of devices"): continue
-                m = re.match(r"(\S+)\s+(\S+)", line)
-                if m and m.group(2) == "device":
-                    serials.append(m.group(1))
-            if serials:
-                result["device"] = {
-                    "serial": serials[0],
-                    "model": self.shell_getprop("ro.product.model").get("stdout",""),
-                    "manufacturer": self.shell_getprop("ro.product.manufacturer").get("stdout",""),
-                    "android": self.shell_getprop("ro.build.version.release").get("stdout",""),
-                    "emui": self.shell_getprop("ro.build.version.emui").get("stdout",""),
-                    "build": self.shell_getprop("ro.build.display.id").get("stdout",""),
-                }
-        return result
+        if not result.get("ok"):
+            return result
+
+        properties = {}
+
+        for line in result.get("stdout", "").splitlines():
+            if "]: [" in line:
+                try:
+                    left, right = line.split("]: [", 1)
+
+                    key = left.lstrip("[")
+                    value = right.rstrip("]")
+
+                    properties[key] = value
+
+                except Exception:
+                    continue
+
+        wanted = [
+            "ro.product.model",
+            "ro.product.manufacturer",
+            "ro.build.version.release",
+            "ro.build.version.emui",
+            "ro.build.display.id"
+        ]
+
+        return {
+            "ok": True,
+            "properties": {
+                key: properties.get(key, "")
+                for key in wanted
+            }
+        }
+
+    def diagnostics(self):
+        return {
+            "adb": {
+                "transport": "adb",
+                **self.adb_devices()
+            },
+
+            "fastboot": {
+                "transport": "fastboot",
+                **self.fastboot_devices()
+            },
+
+            "paths": {
+                "resource_root": str(self.base_dir),
+                "platform_tools": str(self.platform_tools),
+                "adb": str(self.adb),
+                "fastboot": str(self.fastboot)
+            }
+        }
